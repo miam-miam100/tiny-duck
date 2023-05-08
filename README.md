@@ -1,12 +1,16 @@
 # Tiny Duck
 
 `probe-run` is configured as the default runner, so you can start your program as easy as
+
 ```sh
 cargo run --release
 ```
 
 If you aren't using a debugger (or want to use cargo-embed/probe-rs-debugger), change the runner in .cargo/config.toml
 
+This template uses a very specific commit from an experimental PR as currently the hal we are using does not currently
+support setting pins pull-up whilst using the same pins for spi. If you prefer to use the normal hal you will have to
+pull up the pins manually.
 
 <!-- Requirements -->
 <details open="open">
@@ -44,5 +48,10 @@ cargo install elf2uf2-rs --locked
 <details open="open">
   <summary><h2 style="display: inline-block" id="recommended-steps">Recommended Steps</h2></summary>
 You can use any library (called crates) you like as long as it is no-std compatible.
+
+I have imported prse (a library I've made) to help you parse strings into commands.
+I have also imported usbd-hid and usb-device to deal with usb devices.
+
+You can use [example.td](example.td) to test your parsing code.
 
 </details>
