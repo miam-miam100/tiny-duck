@@ -1,6 +1,10 @@
-move 10 10
+move 50 50
 wait 200
-move -10 -10
 click
 wait 300
-key a
+move 50 50
+move -50 50
+click
+wait 200
+move 100 100
+click

@@ -8,7 +8,6 @@ extern crate cortex_m_rt;
 
 use bsp::entry;
 
-use core::hint::spin_loop;
 use defmt::*;
 use defmt_rtt as _;
 use panic_probe as _;
@@ -26,11 +25,11 @@ use bsp::{
     gpio,
     gpio::Pins,
     pac,
-    pio::PIOExt,
     sio::Sio,
     spi,
     watchdog::Watchdog,
 };
+use cortex_m::delay::Delay;
 use embedded_hal::digital::v2::OutputPin;
 
 // Link in the embedded_sdmmc crate.
@@ -41,6 +40,7 @@ use embedded_sdmmc::{Controller, SdMmcSpi, TimeSource, Timestamp, VolumeIdx};
 // Get the file open mode enum:
 use embedded_sdmmc::filesystem::Mode;
 use prse::parse;
+use rp2040_hal::pac::interrupt;
 
 /// A dummy time source, which is mostly important for creating files.
 #[derive(Default)]
@@ -65,6 +65,26 @@ impl TimeSource for DummyTimeSource {
 #[no_mangle]
 #[used]
 pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
+
+// USB Device support
+use usb_device::{class_prelude::*, prelude::*};
+
+// USB Human Interface Device (HID) Class support
+use usbd_hid::descriptor::generator_prelude::*;
+use usbd_hid::descriptor::{KeyboardReport, MouseReport};
+use usbd_hid::hid_class::HIDClass;
+
+/// The USB Device Driver (shared with the interrupt).
+static mut USB_DEVICE: Option<UsbDevice<bsp::usb::UsbBus>> = None;
+
+/// The USB Bus Driver (shared with the interrupt).
+static mut USB_BUS: Option<UsbBusAllocator<bsp::usb::UsbBus>> = None;
+
+/// The USB Human Interface Device Mouse (shared with the interrupt).
+static mut USB_MOUSE: Option<HIDClass<bsp::usb::UsbBus>> = None;
+
+const POLL_RATE: u8 = 10;
+const TICK_RATE: u32 = 2 * POLL_RATE as u32;
 
 #[entry]
 fn main() -> ! {
@@ -95,6 +115,51 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
+    // Set up the USB driver
+    let usb_bus = UsbBusAllocator::new(bsp::usb::UsbBus::new(
+        pac.USBCTRL_REGS,
+        pac.USBCTRL_DPRAM,
+        clocks.usb_clock,
+        true,
+        &mut pac.RESETS,
+    ));
+
+    unsafe {
+        // Note (safety): This is safe as interrupts haven't been started yet
+        USB_BUS = Some(usb_bus);
+    }
+
+    // Grab a reference to the USB Bus allocator. We are promising to the
+    // compiler not to take mutable access to this global variable whilst this
+    // reference exists!
+    let bus_ref = unsafe { USB_BUS.as_ref().unwrap() };
+
+    // Set up the USB HID Class Device driver, providing Mouse Reports
+    let usb_mouse = HIDClass::new(bus_ref, MouseReport::desc(), POLL_RATE);
+
+    unsafe {
+        // Note (safety): This is safe as interrupts haven't been started yet.
+        USB_MOUSE = Some(usb_mouse);
+    }
+
+    // Create a USB device with a fake VID and PID
+    let usb_dev = UsbDeviceBuilder::new(bus_ref, UsbVidPid(0x16c0, 0x27da))
+        .manufacturer("Miam Inc")
+        .product("Tiny Duck")
+        .serial_number("TEST")
+        .composite_with_iads()
+        .build();
+
+    unsafe {
+        // Note (safety): This is safe as interrupts haven't been started yet
+        USB_DEVICE = Some(usb_dev);
+    }
+
+    unsafe {
+        // Enable the USB interrupt
+        pac::NVIC::unmask(pac::Interrupt::USBCTRL_IRQ);
+    };
+
     // These are implicitly used by the spi driver if they are in the correct mode
     let spi_sclk = pins.gpio10.into::<gpio::FunctionSpi, gpio::PullNone>();
     let spi_mosi = pins.gpio11.into::<gpio::FunctionSpi, gpio::PullNone>();
@@ -114,10 +179,22 @@ fn main() -> ! {
     );
 
     let spi_cs = pins.gpio15.into_push_pull_output();
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
-    info!("Aquire SPI SD/MMC BlockDevice...");
-    let mut sdspi = SdMmcSpi::new(spi, spi_cs);
+    let mut delay = Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+    delay.delay_ms(1000);
 
+    // Having problems with the SD Card stuff so we will just embed the file
+    // get_file(SdMmcSpi::new(spi, spi_cs));
+    get_commands(include_bytes!("../example.td"), true, &mut delay);
+    loop {}
+}
+
+fn get_file<SPI, CS>(mut sdspi: SdMmcSpi<SPI, CS>, delay: &mut Delay) -> !
+where
+    SPI: embedded_hal::blocking::spi::Transfer<u8>,
+    CS: OutputPin,
+    <SPI as embedded_hal::blocking::spi::Transfer<u8>>::Error: core::fmt::Debug,
+{
+    info!("Aquire SPI SD/MMC BlockDevice...");
     // Next we need to acquire the block device and initialize the
     // communication with the SD card.
     let block = match sdspi.acquire() {
@@ -160,43 +237,61 @@ fn main() -> ! {
 
     info!("Root directory opened!");
 
-    // This shows how to iterate through the directory and how
-    // to get the file names (and print them in hope they are UTF-8 compatible):
-    cont.iterate_dir(&volume, &dir, |ent| {
-        info!(
-            "/{}.{}",
-            core::str::from_utf8(ent.name.base_name()).unwrap(),
-            core::str::from_utf8(ent.name.extension()).unwrap()
-        );
-    })
-    .unwrap();
-
-    pins.gpio5.into_push_pull_output().set_high();
-
     // Next we going to read a file from the SD card:
     if let Ok(mut file) = cont.open_file_in_dir(&mut volume, &dir, "main.td", Mode::ReadOnly) {
         let mut buf = [0u8; 64];
         while !file.eof() {
             let read_count = cont.read(&volume, &mut file, &mut buf).unwrap();
-            let (mut idx, _) = buf[..read_count]
-                .iter()
-                .enumerate()
-                .rfind(|(_, &c)| c == '\n' as u8)
-                .unwrap();
-            if buf.get(idx - 1) == Some(&('\r' as u8)) {
-                idx -= 1;
-            }
-            for com in core::str::from_utf8(&buf[..idx])
-                .unwrap()
-                .lines()
-                .map(|l| parse!(l, "{}"))
-            {
-                let com: Command = com;
-                com.run();
+            let seek_to = get_commands(&buf[..read_count], file.eof(), delay);
+            if let Some(seek) = seek_to {
+                file.seek_from_current(seek).unwrap();
             }
             buf = [0; 64];
         }
         cont.close_file(&volume, file).unwrap();
     }
     loop {}
+}
+
+/// Returns the index up to which it has parsed.
+fn get_commands(buf: &[u8], read_full: bool, delay: &mut Delay) -> Option<i32> {
+    let mut result = None;
+    let buf = if read_full {
+        buf
+    } else {
+        let mut idx = buf
+            .iter()
+            .enumerate()
+            .rfind(|(_, &c)| c == b'\n')
+            .unwrap()
+            .0;
+
+        let diff = idx as i32 - (buf.len() as i32 - 1);
+        result = Some(diff);
+        if buf.get(idx - 1) == Some(&(b'\r')) {
+            idx -= 1;
+        }
+        &buf[..idx]
+    };
+    for com in core::str::from_utf8(buf)
+        .unwrap()
+        .lines()
+        .map(|l| parse!(l, "{}"))
+    {
+        let com: Command = com;
+        com.run(delay);
+    }
+    result
+}
+
+/// This function is called whenever the USB Hardware generates an Interrupt
+/// Request.
+#[allow(non_snake_case)]
+#[interrupt]
+unsafe fn USBCTRL_IRQ() {
+    // Handle USB request
+    info!("Handle usb request.");
+    let usb_dev = USB_DEVICE.as_mut().unwrap();
+    let usb_mouse = USB_MOUSE.as_mut().unwrap();
+    usb_dev.poll(&mut [usb_mouse]);
 }
