@@ -1,6 +1,6 @@
 [package]
 edition = "2021"
-name = "rp2040-project-template"
+name = "tiny-duck"
 version = "0.1.0"
 
 [dependencies]
@@ -16,11 +16,12 @@ defmt-rtt = "0.4"
 panic-probe = { version = "0.3", features = ["print-defmt"] }
 
 # We're using a Pico by default on this template
-rp-pico = "0.7"
+rp2040-boot2 = "0.2.0"
+rp2040-hal = { version = "0.8.1", git="https://github.com/ithinuel/rp-hal/", rev="3448cd9c026b49210c8f46e99012efc1d2536284", features=["critical-section-impl", "rom-func-cache", "rt"] }
 
-usb-device = "0.2.9"
-usbd-serial = "0.1.1"
-
+embedded-sdmmc = { version = "0.4.0", features = ["defmt-log"], default-features = false }
+fugit = "0.3.6"
+spi-pio = { version = "0.1.0", git="https://github.com/rp-rs/spi-pio-rs" }
 # but you can use any BSP. Uncomment this to use the pro_micro_rp2040 BSP instead
 # sparkfun-pro-micro-rp2040 = "0.6"
 
