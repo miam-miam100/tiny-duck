@@ -7,10 +7,13 @@
 extern crate cortex_m_rt;
 
 use bsp::entry;
+
 use core::hint::spin_loop;
 use defmt::*;
 use defmt_rtt as _;
 use panic_probe as _;
+mod commands;
+use commands::Command;
 
 // Provide an alias for our BSP so we can switch targets quickly.
 // Uncomment the BSP you included in Cargo.toml, the rest of the code does not need to change.
@@ -37,6 +40,7 @@ use embedded_sdmmc::{Controller, SdMmcSpi, TimeSource, Timestamp, VolumeIdx};
 
 // Get the file open mode enum:
 use embedded_sdmmc::filesystem::Mode;
+use prse::parse;
 
 /// A dummy time source, which is mostly important for creating files.
 #[derive(Default)]
@@ -167,15 +171,32 @@ fn main() -> ! {
     })
     .unwrap();
 
-    // Next we going to read a file from the SD card:
-    if let Ok(mut file) = cont.open_file_in_dir(&mut volume, &dir, "test2.txt", Mode::ReadOnly) {
-        let mut buf = [0u8; 32];
-        let read_count = cont.read(&volume, &mut file, &mut buf).unwrap();
-        cont.close_file(&volume, file).unwrap();
+    pins.gpio5.into_push_pull_output().set_high();
 
-        if read_count >= 2 {
-            info!("READ {} bytes: {}", read_count, buf);
+    // Next we going to read a file from the SD card:
+    if let Ok(mut file) = cont.open_file_in_dir(&mut volume, &dir, "main.td", Mode::ReadOnly) {
+        let mut buf = [0u8; 64];
+        while !file.eof() {
+            let read_count = cont.read(&volume, &mut file, &mut buf).unwrap();
+            let (mut idx, _) = buf[..read_count]
+                .iter()
+                .enumerate()
+                .rfind(|(_, &c)| c == '\n' as u8)
+                .unwrap();
+            if buf.get(idx - 1) == Some(&('\r' as u8)) {
+                idx -= 1;
+            }
+            for com in core::str::from_utf8(&buf[..idx])
+                .unwrap()
+                .lines()
+                .map(|l| parse!(l, "{}"))
+            {
+                let com: Command = com;
+                com.run();
+            }
+            buf = [0; 64];
         }
+        cont.close_file(&volume, file).unwrap();
     }
     loop {}
 }

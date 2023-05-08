@@ -17,6 +17,7 @@ panic-probe = { version = "0.3", features = ["print-defmt"] }
 
 # We're using a Pico by default on this template
 rp2040-boot2 = "0.2.0"
+prse = { version = "1.0.1", default-features = false }
 rp2040-hal = { version = "0.8.1", git="https://github.com/ithinuel/rp-hal/", rev="3448cd9c026b49210c8f46e99012efc1d2536284", features=["critical-section-impl", "rom-func-cache", "rt"] }
 
 embedded-sdmmc = { version = "0.4.0", features = ["defmt-log"], default-features = false }
